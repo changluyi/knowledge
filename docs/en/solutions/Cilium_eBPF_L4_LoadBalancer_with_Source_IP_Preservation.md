@@ -7,32 +7,32 @@ kind:
 sourceSHA: pending
 ---
 
-# 基于 eBPF 的高性能容器网络 Cilium CNI 和 eBPF 实现的高性能四层负载均衡（支持源 IP 可见的 S2 方案）
+# High-Performance Container Networking with Cilium CNI and eBPF-based L4 Load Balancer (Source IP Preservation)
 
-本文档介绍如何在 ACP 4.2 以上版本集群中部署 Cilium CNI，并利用 eBPF 实现高性能四层负载均衡，支持源 IP 透传。
+This document describes how to deploy Cilium CNI in a ACP 4.2+ cluster and leverage eBPF to implement high-performance Layer 4 load balancing with source IP preservation.
 
-## 环境要求
+## Prerequisites
 
-| 项目 | 要求 |
+| Item | Requirement |
 |------|------|
-| ACP 版本 | 4.2+ |
-| 网络模式 | Custom（自定义）模式 |
-| 架构 | x86_64 / amd64 |
+| ACP Version | 4.2+ |
+| Network Mode | Custom Mode |
+| Architecture | x86_64 / amd64 |
 
-> **操作系统要求**：参考 ACP 产品文档的 [操作系统基线](https://docs.alauda.io/install/prepare/prerequisites#supported_os_and_kernels)。
+> **OS Requirements**: Refer to the ACP product documentation [OS Baseline](https://docs.alauda.io/install/prepare/prerequisites#supported_os_and_kernels).
 >
-> **注意**：由于 Cilium/eBPF 需要 Linux 内核 4.19+（推荐 5.10+），以下操作系统**不支持**：
-> - CentOS 7.x（内核版本 3.10.x）
-> - RHEL 7.x（内核版本 3.10.x - 4.18.x）
+> **Note**: Cilium/eBPF requires Linux kernel 4.19+ (5.10+ recommended). The following operating systems are **NOT supported**:
+> - CentOS 7.x (kernel version 3.10.x)
+> - RHEL 7.x (kernel version 3.10.x - 4.18.x)
 >
-> 推荐使用：
+> Recommended:
 > - RHEL 8.x
 > - Ubuntu 22.04
 > - MicroOS
 
-### 节点端口要求
+### Node Port Requirements
 
-| 端口 | 组件 | 说明 |
+| Port | Component | Description |
 |------|------|------|
 | 4240 | cilium-agent | Health API |
 | 9962 | cilium-agent | Prometheus Metrics |
@@ -42,27 +42,28 @@ sourceSHA: pending
 | 9891 | cilium-operator | Operator Metrics |
 | 9234 | cilium-operator | Metrics |
 
-### 内核配置要求
+### Kernel Configuration Requirements
 
-确保节点内核已启用以下配置（可通过 `grep` 检查 `/boot/config-$(uname -r)`）：
+Ensure the following kernel configurations are enabled on the nodes (can be checked via `grep` in `/boot/config-$(uname -r)`):
 
-- `CONFIG_BPF=y` 或 `=m`
-- `CONFIG_BPF_SYSCALL=y` 或 `=m`
-- `CONFIG_NET_CLS_BPF=y` 或 `=m`
-- `CONFIG_BPF_JIT=y` 或 `=m`
-- `CONFIG_NET_SCH_INGRESS=y` 或 `=m`
-- `CONFIG_CRYPTO_USER_API_HASH=y` 或 `=m`
+- `CONFIG_BPF=y` or `=m`
+- `CONFIG_BPF_SYSCALL=y` or `=m`
+- `CONFIG_NET_CLS_BPF=y` or `=m`
+- `CONFIG_BPF_JIT=y` or `=m`
+- `CONFIG_NET_SCH_INGRESS=y` or `=m`
+- `CONFIG_CRYPTO_USER_API_HASH=y` or `=m`
 
-## ACP 4.x Cilium 部署步骤
+## ACP 4.x Cilium Deployment Steps
 
-### Step 1: 创建集群
+### Step 1: Create Cluster
 
-在创建集群页面，**Network Mode（网络模式）** 使用 **Custom** 模式。等到集群到达 `EnsureWaitClusterModuleReady` 状态时，再去部署 Cilium。
+On the cluster creation page, set **Network Mode** to **Custom** mode. Wait until the cluster reaches `EnsureWaitClusterModuleReady` status before deploying Cilium.
 
-### Step 2: 安装 Cilium
+### Step 2: Install Cilium
 
-1. 从 ACP 应用市场下载最新的 Cilium 镜像包（v4.2.x 版本）
-2. 使用 violet 上传到环境：
+1. Download the latest Cilium image package (v4.2.x) from the ACP marketplace
+
+2. Upload to the platform using violet:
 
 ```bash
 export PLATFORM_URL=""
@@ -73,9 +74,9 @@ export CLUSTER_NAME=''
 violet push cilium-v4.2.17.tgz --platform-address "$PLATFORM_URL" --platform-username "$USERNAME" --platform-password "$PASSWORD" --clusters "CLUSTER_NAME"
 ```
 
-3. 在安装 Cilium 的业务集群临时配置 RBAC（因为集群部署成功前这个 RBAC 权限还没配置，所以需要临时配置）：
+3. Create temporary RBAC configuration on the business cluster where Cilium will be installed (this RBAC permission is not configured before the cluster is successfully deployed):
 
-创建临时 RBAC 配置文件：
+Create temporary RBAC configuration file:
 
 ```bash
 cat > tmp.yaml << 'EOF'
@@ -107,34 +108,34 @@ subjects:
 EOF
 ```
 
-应用临时 RBAC 配置：
+Apply temporary RBAC configuration:
 
 ```bash
 kubectl apply -f tmp.yaml
 ```
 
-4. 进入集群插件市场页面，安装 Cilium
+4. Navigate to the cluster plugin marketplace page and install Cilium
 
-5. Cilium 安装成功后，删除临时 RBAC 配置：
+5. After Cilium is successfully installed, delete the temporary RBAC configuration:
 
 ```bash
 kubectl delete -f tmp.yaml
 rm tmp.yaml
 ```
 
-## 创建透传的 L4 负载均衡
+## Create L4 Load Balancer with Source IP Preservation
 
-进入后台 master 节点执行以下操作。
+Execute the following operations on the master node backend.
 
-### Step 1: 删除 kube-proxy 并清理规则
+### Step 1: Remove kube-proxy and Clean Up Rules
 
-1. 获取 kube-proxy 当前的镜像：
+1. Get the current kube-proxy image:
 
 ```bash
 kubectl get -n kube-system kube-proxy -oyaml | grep image
 ```
 
-2. 备份并删除 kube-proxy 的 DaemonSet：
+2. Backup and delete the kube-proxy DaemonSet:
 
 ```bash
 kubectl -n kube-system get ds kube-proxy -oyaml > kube-proxy-backup.yaml
@@ -142,7 +143,7 @@ kubectl -n kube-system get ds kube-proxy -oyaml > kube-proxy-backup.yaml
 kubectl -n kube-system delete ds kube-proxy
 ```
 
-3. 创建清理的 BroadcastJob：
+3. Create a BroadcastJob to clean up kube-proxy rules:
 
 ```yaml
 apiVersion: operator.alauda.io/v1alpha1
@@ -171,7 +172,7 @@ spec:
       - operator: Exists
       containers:
       - name: kube-proxy-cleanup
-        image: registry.alauda.cn:60070/tkestack/kube-proxy:v1.33.5      ## 替换成当前环境的 kube-proxy 镜像
+        image: registry.alauda.cn:60070/tkestack/kube-proxy:v1.33.5      ## Replace with the kube-proxy image from Step 1
         imagePullPolicy: IfNotPresent
         command:
         - /bin/sh
@@ -205,21 +206,22 @@ spec:
         hostPath:
           path: /run/xtables.lock
           type: FileOrCreate
+EOF
 ```
 
-保存为 `kube-proxy-cleanup.yaml` 并应用：
+Save as `kube-proxy-cleanup.yaml` and apply:
 
 ```bash
 kubectl apply -f kube-proxy-cleanup.yaml
 ```
 
-BroadcastJob 配置了 `ttlSecondsAfterFinished: 300`，执行完成后会在 5 分钟内自动清理。
+The BroadcastJob is configured with `ttlSecondsAfterFinished: 300` and will be automatically cleaned up within 5 minutes after completion.
 
-### Step 2: 创建地址池
+### Step 2: Create Address Pool
 
-> **VIP 地址要求**：Cilium L2 Announcement 通过 ARP 广播实现 IP 漂移，因此 VIP 必须与集群节点在**同一个二层网络**中，确保 ARP 请求能够正常广播和响应。
+> **VIP Address Requirement**: Cilium L2 Announcement implements IP failover through ARP broadcasting. Therefore, the VIP must be in the **same Layer 2 network** as the cluster nodes to ensure ARP requests can be properly broadcast and responded to.
 
-保存为 `lb-resources.yaml`：
+Save as `lb-resources.yaml`:
 
 ```yaml
 apiVersion: cilium.io/v2alpha1
@@ -228,7 +230,7 @@ metadata:
   name: lb-pool
 spec:
   blocks:
-    - cidr: "192.168.132.192/32"    # 替换为实际分配的 VIP 段
+    - cidr: "192.168.132.192/32"    # Replace with the actual VIP segment
 ---
 apiVersion: cilium.io/v2alpha1
 kind: CiliumL2AnnouncementPolicy
@@ -236,46 +238,46 @@ metadata:
   name: l2-policy
 spec:
   interfaces:
-    - eth0                          # 替换为实际网卡名
+    - eth0                          # Replace with the actual network interface name
   externalIPs: true
   loadBalancerIPs: true
 ```
 
-应用配置：
+Apply the configuration:
 
 ```bash
 kubectl apply -f lb-resources.yaml
 ```
 
-### Step 3: 验证
+### Step 3: Verification
 
-创建 LB Service，验证是否分配到 IP，并测试连通性。
+Create a LoadBalancer Service to verify IP allocation and test connectivity.
 
-**验证 1：查看 LB Service 是否分配了 IP**
+**Verification 1: Check if LB Service has been assigned an IP**
 
 ```bash
 kubectl get svc -A
 ```
 
-预期输出示例：
+Expected output example:
 
 ```
 NAMESPACE      NAME                      TYPE           CLUSTER-IP     EXTERNAL-IP       PORT(S)                     AGE
 cilium-123-1   test                      LoadBalancer   10.4.98.81     192.168.132.192   80:31447/TCP                35s
 ```
 
-**验证 2：查看发起 ARP 请求的 Leader 节点**
+**Verification 2: Check the leader node sending ARP requests**
 
 ```bash
 kubectl get leases -A | grep cilium
 ```
 
-预期输出示例：
+Expected output example:
 
 ```
 cpaas-system      cilium-l2announce-cilium-123-1-test       192.168.141.196                                                                 24s
 ```
 
-**验证 3：测试外部访问**
+**Verification 3: Test external access**
 
-从外部能访问通这个 LoadBalancer Service，并且在 Pod 内抓包可以看到源 IP 是 Client 端的，即透传成功。
+From an external client, access the LoadBalancer Service. Capturing packets inside the Pod should show the source IP as the client's IP, indicating successful source IP preservation.
